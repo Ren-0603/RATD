@@ -18,7 +18,7 @@ class RATD_base(nn.Module):
         if self.is_unconditional == False:
             self.emb_total_dim += 1  # for conditional mask
         self.embed_layer = nn.Embedding(
-            num_embeddings=self.target_dim, embedding_dim=self.emb_feature_dim
+            num_embeddings=512, embedding_dim=self.emb_feature_dim
         )
         config_diff = config["diffusion"]
         config_diff["side_dim"] = self.emb_total_dim
@@ -85,22 +85,48 @@ class RATD_base(nn.Module):
 
     def get_side_info(self, observed_tp, cond_mask):
         B, K, L = cond_mask.shape
+        
+        
+        if self.embed_layer.num_embeddings <= K:
+            raise ValueError(f"❌ K={K} exceeds embed_layer limit: {self.embed_layer.num_embeddings}")
+        self.target_dim = K
+        
+    
+    # 時間埋め込み (B, L, emb)
+        time_embed = self.time_embedding(observed_tp, self.emb_time_dim)
+        
 
-        time_embed = self.time_embedding(observed_tp, self.emb_time_dim)  # (B,L,emb)
-        time_embed = time_embed.unsqueeze(2).expand(-1, -1, K, -1)
-        feature_embed = self.embed_layer(
-            torch.arange(self.target_dim).to(self.device)
-        )  # (K,emb)
-        feature_embed = feature_embed.unsqueeze(0).unsqueeze(0).expand(B, L, -1, -1)
+        if time_embed.shape[1] != L:
+            raise ValueError(f"Length mismatch in time_embed: expected {L}, got {time_embed.shape[1]}")
 
-        side_info = torch.cat([time_embed, feature_embed], dim=-1)  # (B,L,K,*)
-        side_info = side_info.permute(0, 3, 2, 1)  # (B,*,K,L)
+    # 拡張して (B, L, K, emb)
+        time_embed = time_embed.unsqueeze(2).expand(B, L, K, -1)
+        
+    # 特徴量埋め込み (K, emb)
+        feature_embed = self.embed_layer(torch.arange(K, device=self.device))
+        
+        feature_embed = feature_embed.unsqueeze(0).unsqueeze(0).expand(B, L, K, -1)
+        
 
-        if self.is_unconditional == False:
+    # (B, L, K, emb_total)
+        side_info = torch.cat([time_embed, feature_embed], dim=-1)
+        
+
+    # → (B, emb_total, K, L)
+        side_info = side_info.permute(0, 3, 2, 1)
+        
+
+        if not self.is_unconditional:
             side_mask = cond_mask.unsqueeze(1)  # (B,1,K,L)
-            side_info = torch.cat([side_info, side_mask], dim=1)
+           
+            if side_mask.shape[2] != side_info.shape[2]:
+                print(f"⚠️ Warning: K mismatch. side_info.shape={side_info.shape}, side_mask.shape={side_mask.shape}")
+                min_K = min(side_mask.shape[2], side_info.shape[2])
+                side_mask = side_mask[:, :, :min_K, :]
+                side_info = side_info[:, :, :min_K, :]
 
         return side_info
+
 
     def calc_loss_valid(
         self, observed_data, cond_mask, observed_mask, side_info, is_train, reference=None
@@ -280,23 +306,42 @@ class RATD_Forecasting(RATD_base):
         extracted_gt_mask = torch.stack(extracted_gt_mask,0)
         return extracted_data, extracted_mask,extracted_feature_id, extracted_gt_mask
 
-
     def get_side_info(self, observed_tp, cond_mask):
         B, K, L = cond_mask.shape
+        self.target_dim = K
 
-        time_embed = self.time_embedding(observed_tp, self.emb_time_dim)  # (B,L,emb)
-        time_embed = time_embed.unsqueeze(2).expand(-1, -1, self.target_dim, -1)
-        feature_embed = self.embed_layer(
-            torch.arange(self.target_dim).to(self.device)
-        )  # (K,emb)
-        feature_embed = feature_embed.unsqueeze(0).unsqueeze(0).expand(B, L, -1, -1)
-        
-        side_info = torch.cat([time_embed, feature_embed], dim=-1)  # (B,L,K,*)
-        side_info = side_info.permute(0, 3, 2, 1)  # (B,*,K,L)
+    # 時間埋め込み (B, L, emb_time)
+        time_embed = self.time_embedding(observed_tp, self.emb_time_dim)
+        if time_embed.shape[1] != L:
+            raise ValueError(f"Length mismatch in time_embed: expected {L}, got {time_embed.shape[1]}")
 
-        if self.is_unconditional == False:
-            side_mask = cond_mask.unsqueeze(1)  # (B,1,K,L)
-            side_info = torch.cat([side_info, side_mask], dim=1)
+        time_embed = time_embed.unsqueeze(2).expand(B, L, K, -1)  # (B, L, K, emb_time)
+
+    # 特徴量埋め込み (K, emb_feature)
+        if K > self.embed_layer.num_embeddings:
+            raise ValueError(f"K={K} exceeds embedding size: {self.embed_layer.num_embeddings}")
+        feature_embed = self.embed_layer(torch.arange(K, device=self.device))  # (K, emb_feature)
+        feature_embed = feature_embed.unsqueeze(0).unsqueeze(0).expand(B, L, K, -1)  # (B, L, K, emb_feature)
+
+    # 結合して (B, L, K, emb_total)
+        side_info = torch.cat([time_embed, feature_embed], dim=-1)  # (B, L, K, emb_total)
+        side_info = side_info.permute(0, 3, 2, 1)  # (B, emb_total, K, L)
+
+        if not self.is_unconditional:
+             side_mask = cond_mask.unsqueeze(1)  # (B, 1, K, L)
+
+        # 🔧 ここで KとLを揃える
+             if side_info.shape[2:] != side_mask.shape[2:]:
+                 min_K = min(side_info.shape[2], side_mask.shape[2])
+                 min_L = min(side_info.shape[3], side_mask.shape[3])
+                 side_info = side_info[:, :, :min_K, :min_L]
+                 side_mask = side_mask[:, :, :min_K, :min_L]
+
+             side_info = torch.cat([side_info, side_mask], dim=1)
+
+             return side_info
+
+
 
         return side_info
 
@@ -328,7 +373,8 @@ class RATD_Forecasting(RATD_base):
             observed_tp,
             gt_mask,
             _,
-            _, 
+            cut_length,
+            reference
         ) = self.process_data(batch)
 
         with torch.no_grad():
@@ -337,4 +383,4 @@ class RATD_Forecasting(RATD_base):
             side_info = self.get_side_info(observed_tp, cond_mask)
             samples = self.impute(observed_data, cond_mask, side_info, n_samples)
 
-        return samples, observed_data, target_mask, observed_mask, observed_tp
+        return samples, observed_data, target_mask, observed_mask, observed_tp, cut_length

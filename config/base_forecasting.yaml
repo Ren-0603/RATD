@@ -1,11 +1,8 @@
-
-#type: args
-
 train:
-  epochs: 100
-  batch_size: 1
+  epochs: 10000
+  batch_size: 8
   lr: 3.0e-4
-  itr_per_epoch: 1.0e+8
+  itr_per_epoch: 100000000
 
 diffusion:
   layers: 4 
@@ -17,12 +14,20 @@ diffusion:
   num_steps: 50
   schedule: "quad"
   is_linear: True
-
+  h_size: 180         # 過去入力の系列長さ
+  ref_size: 30        # 未来の予測長さ
+  side_dim: 145        # timeemb(128) + featureemb(16) + cond_mask(1)
 
 model:
-  is_unconditional: 0
+  is_unconditional: False
   timeemb: 128
   featureemb: 16
   target_strategy: "test"
-  num_sample_features: 64
-  use_reference: True
+  num_sample_features: 4       # 実データはOHLCの4系列
+  use_reference: False         # Retrieval無しのDiffusionのみ
+
+path:
+  dataset_path: "./"
+  data_file: "usdjpy_ratd_ready_final.csv"
+
+device: cuda  # または cpu（GPU がない場合）

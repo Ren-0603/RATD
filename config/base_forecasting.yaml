@@ -1,5 +1,5 @@
 train:
-  epochs: 7777777
+  epochs: 7777771000000
   batch_size: 8
   lr: 3.0e-4
   itr_per_epoch: 100000000
